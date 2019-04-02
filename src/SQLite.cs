@@ -173,6 +173,7 @@ namespace SQLite
 		readonly static Dictionary<string, TableMapping> _mappings = new Dictionary<string, TableMapping> ();
 		private System.Diagnostics.Stopwatch _sw;
 		private long _elapsedMilliseconds = 0;
+		private readonly IReadOnlyList<SQLSerializer> _serializers;
 
 		private int _transactionDepth = 0;
 		private Random _rand = new Random ();
@@ -234,8 +235,11 @@ namespace SQLite
 		/// If you use DateTimeOffset properties, it will be always stored as ticks regardingless
 		/// the storeDateTimeAsTicks parameter.
 		/// </param>
-		public SQLiteConnection (string databasePath, bool storeDateTimeAsTicks = true)
-			: this (new SQLiteConnectionString (databasePath, SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.Create, storeDateTimeAsTicks))
+		/// <param name="serializers">
+		/// Optional set of serializers to convert back and forth custom types to sql types
+		/// </param>
+		public SQLiteConnection (string databasePath, bool storeDateTimeAsTicks = true, IReadOnlyList<SQLSerializer> serializers = null)
+			: this (new SQLiteConnectionString (databasePath, SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.Create, storeDateTimeAsTicks, serializers))
 		{
 		}
 
@@ -255,9 +259,12 @@ namespace SQLite
 		/// down sides, when setting storeDateTimeAsTicks = true.
 		/// If you use DateTimeOffset properties, it will be always stored as ticks regardingless
 		/// the storeDateTimeAsTicks parameter.
+		/// <param name="serializers">
+		/// Optional set of serializers to convert back and forth custom types to sql types
 		/// </param>
-		public SQLiteConnection (string databasePath, SQLiteOpenFlags openFlags, bool storeDateTimeAsTicks = true)
-			: this (new SQLiteConnectionString (databasePath, openFlags, storeDateTimeAsTicks))
+		/// </param>
+		public SQLiteConnection (string databasePath, SQLiteOpenFlags openFlags, bool storeDateTimeAsTicks = true, IReadOnlyList<SQLSerializer> serializers = null)
+			: this (new SQLiteConnectionString (databasePath, openFlags, storeDateTimeAsTicks, serializers))
 		{
 		}
 
@@ -303,6 +310,9 @@ namespace SQLite
 			StoreDateTimeAsTicks = connectionString.StoreDateTimeAsTicks;
 
 			BusyTimeout = TimeSpan.FromSeconds (0.1);
+			
+
+			_serializers = connectionString.Serializers;
 			Tracer = line => Debug.WriteLine (line);
 
 			connectionString.PreKeyAction?.Invoke (this);
@@ -438,12 +448,12 @@ namespace SQLite
 			lock (_mappings) {
 				if (_mappings.TryGetValue (key, out map)) {
 					if (createFlags != CreateFlags.None && createFlags != map.CreateFlags) {
-						map = new TableMapping (type, createFlags);
+						map = new TableMapping (type, _serializers, createFlags);
 						_mappings[key] = map;
 					}
 				}
 				else {
-					map = new TableMapping (type, createFlags);
+					map = new TableMapping (type, _serializers, createFlags);
 					_mappings.Add (key, map);
 				}
 			}
@@ -2104,6 +2114,9 @@ namespace SQLite
 		public Action<SQLiteConnection> PostKeyAction { get; }
 		public string VfsName { get; }
 
+		public IReadOnlyList<SQLSerializer> Serializers;
+		
+
 #if NETFX_CORE
 		static readonly string MetroStyleDataPath = Windows.Storage.ApplicationData.Current.LocalFolder.Path;
 
@@ -2134,8 +2147,8 @@ namespace SQLite
 		/// If you use DateTimeOffset properties, it will be always stored as ticks regardingless
 		/// the storeDateTimeAsTicks parameter.
 		/// </param>
-		public SQLiteConnectionString (string databasePath, bool storeDateTimeAsTicks = true)
-			: this (databasePath, SQLiteOpenFlags.Create | SQLiteOpenFlags.ReadWrite, storeDateTimeAsTicks)
+		public SQLiteConnectionString (string databasePath, bool storeDateTimeAsTicks = true, IReadOnlyList<SQLSerializer> serializers = null)
+			: this (databasePath, SQLiteOpenFlags.Create | SQLiteOpenFlags.ReadWrite, storeDateTimeAsTicks, serializers)
 		{
 		}
 
@@ -2165,8 +2178,8 @@ namespace SQLite
 		/// <param name="vfsName">
 		/// Specifies the Virtual File System to use on the database.
 		/// </param>
-		public SQLiteConnectionString (string databasePath, bool storeDateTimeAsTicks, object key = null, Action<SQLiteConnection> preKeyAction = null, Action<SQLiteConnection> postKeyAction = null, string vfsName = null)
-			: this (databasePath, SQLiteOpenFlags.Create | SQLiteOpenFlags.ReadWrite, storeDateTimeAsTicks, key, preKeyAction, postKeyAction, vfsName)
+		public SQLiteConnectionString (string databasePath, bool storeDateTimeAsTicks, object key = null, Action<SQLiteConnection> preKeyAction = null, Action<SQLiteConnection> postKeyAction = null, string vfsName = null, IReadOnlyList<SQLSerializer> serializers = null)
+			: this (databasePath, SQLiteOpenFlags.Create | SQLiteOpenFlags.ReadWrite, storeDateTimeAsTicks, serializers, key, preKeyAction, postKeyAction, vfsName)
 		{
 		}
 
@@ -2199,7 +2212,7 @@ namespace SQLite
 		/// <param name="vfsName">
 		/// Specifies the Virtual File System to use on the database.
 		/// </param>
-		public SQLiteConnectionString (string databasePath, SQLiteOpenFlags openFlags, bool storeDateTimeAsTicks, object key = null, Action<SQLiteConnection> preKeyAction = null, Action<SQLiteConnection> postKeyAction = null, string vfsName = null)
+		public SQLiteConnectionString (string databasePath, SQLiteOpenFlags openFlags, bool storeDateTimeAsTicks, IReadOnlyList<SQLSerializer> serializers = null, object key = null, Action<SQLiteConnection> preKeyAction = null, Action<SQLiteConnection> postKeyAction = null, string vfsName = null)
 		{
 			if (key != null && !((key is byte[]) || (key is string)))
 				throw new ArgumentException ("Encryption keys must be strings or byte arrays", nameof (key));
@@ -2211,6 +2224,7 @@ namespace SQLite
 			PostKeyAction = postKeyAction;
 			OpenFlags = openFlags;
 			VfsName = vfsName;
+			Serializers = serializers;
 
 #if NETFX_CORE
 			DatabasePath = IsInMemoryPath(databasePath)
@@ -2357,7 +2371,7 @@ namespace SQLite
 		readonly Column[] _insertColumns;
 		readonly Column[] _insertOrReplaceColumns;
 
-		public TableMapping (Type type, CreateFlags createFlags = CreateFlags.None)
+		public TableMapping (Type type, IReadOnlyList<SQLSerializer> serializers = null, CreateFlags createFlags = CreateFlags.None)
 		{
 			MappedType = type;
 			CreateFlags = createFlags;
@@ -2397,7 +2411,7 @@ namespace SQLite
 			foreach (var p in props) {
 				var ignore = p.IsDefined (typeof (IgnoreAttribute), true);
 				if (!ignore) {
-					cols.Add (new Column (p, createFlags));
+					cols.Add (new Column (p, serializers, createFlags));
 				}
 			}
 			Columns = cols.ToArray ();
@@ -2484,17 +2498,19 @@ namespace SQLite
 
 			public bool StoreAsText { get; private set; }
 
-			public Column (PropertyInfo prop, CreateFlags createFlags = CreateFlags.None)
-			{
-				var colAttr = prop.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof (ColumnAttribute));
+			private SQLSerializer _serializer;
 
-				_prop = prop;
-				Name = (colAttr != null && colAttr.ConstructorArguments.Count > 0) ?
-						colAttr.ConstructorArguments[0].Value?.ToString () :
-						prop.Name;
+            public Column(PropertyInfo prop, IReadOnlyList<SQLSerializer> serializers = null, CreateFlags createFlags = CreateFlags.None)
+            {
+                var colAttr = (ColumnAttribute)prop.GetCustomAttributes(typeof(ColumnAttribute), true).FirstOrDefault();
+
+                _prop = prop;
+                Name = colAttr == null ? prop.Name : colAttr.Name;
 				//If this type is Nullable<T> then Nullable.GetUnderlyingType returns the T, otherwise it returns null, so get the actual type instead
-				ColumnType = Nullable.GetUnderlyingType (prop.PropertyType) ?? prop.PropertyType;
-				Collation = Orm.Collation (prop);
+				var typeToSerialize = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
+				_serializer = serializers?.SingleOrDefault(x => x.InputType == typeToSerialize);
+				ColumnType = _serializer?.SQLType ?? typeToSerialize;
+				Collation = Orm.Collation(prop);
 
 				IsPK = Orm.IsPK (prop) ||
 					(((createFlags & CreateFlags.ImplicitPK) == CreateFlags.ImplicitPK) &&
@@ -2518,19 +2534,25 @@ namespace SQLite
 				StoreAsText = prop.PropertyType.GetTypeInfo ().CustomAttributes.Any (x => x.AttributeType == typeof (StoreAsTextAttribute));
 			}
 
-			public void SetValue (object obj, object val)
+			public void SetValue(object obj, object val)
 			{
 				if (val != null && ColumnType.GetTypeInfo ().IsEnum) {
 					_prop.SetValue (obj, Enum.ToObject (ColumnType, val));
 				}
 				else {
+					if (_serializer != null)
+						val = _serializer.FromSQL(val);
 					_prop.SetValue (obj, val, null);
 				}
 			}
 
-			public object GetValue (object obj)
+			public object GetValue(object obj)
 			{
-				return _prop.GetValue (obj, null);
+				var value = _prop.GetValue(obj, null);
+				if (_serializer != null)
+					value = _serializer.ToSQL(value);
+
+				return value;
 			}
 		}
 	}
@@ -4445,4 +4467,50 @@ namespace SQLite
 			Null = 5
 		}
 	}
+
+	public class SQLSerializer
+	{
+		public readonly Func<object, object> ToSQL;
+		public readonly Func<object, object> FromSQL;
+		public readonly Type InputType;
+		public readonly Type SQLType;
+
+		private SQLSerializer(Func<object, object> serializer, Func<object, object> deserializer, Type inputType, Type outputType)
+		{
+			ToSQL = serializer;
+			FromSQL = deserializer;
+			InputType = inputType;
+			SQLType = outputType;
+		}
+
+		public static SQLSerializer Create<TIn, TSQL>(Func<TIn, TSQL> toSQL, Func<TSQL, TIn> fromSQL)
+		{
+			return new SQLSerializer(
+				o => toSQL((TIn)o),
+				o => fromSQL((TSQL)o),
+				typeof(TIn),
+				typeof(TSQL));
+		}
+	}
 }
+
+#if NO_CONCURRENT
+namespace SQLite.Extensions
+{
+    public static class ListEx
+    {
+        public static bool TryAdd<TKey, TValue> (this IDictionary<TKey, TValue> dict, TKey key, TValue value)
+        {
+            try {
+                dict.Add (key, value);
+                return true;
+            }
+            catch (ArgumentException) {
+                return false;
+            }
+        }
+    }
+}
+#endif
+
+

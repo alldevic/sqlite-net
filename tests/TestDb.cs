@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 #if NETFX_CORE
@@ -53,7 +54,7 @@ namespace SQLite.Tests
 
 	public class TestDb : SQLiteConnection
 	{
-		public TestDb (bool storeDateTimeAsTicks = true, object key = null, bool wal = true) : base (new SQLiteConnectionString (TestPath.GetTempFileName (), storeDateTimeAsTicks, key: key))
+		public TestDb (bool storeDateTimeAsTicks = true, IReadOnlyList<SQLSerializer> serializers = null, object key = null, bool wal = true) : base (new SQLiteConnectionString (TestPath.GetTempFileName(), storeDateTimeAsTicks,key, null, null, null,serializers))
 		{
 			Trace = true;
 			if (wal)
