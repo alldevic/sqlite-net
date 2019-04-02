@@ -35,6 +35,9 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Text;
 using System.Threading;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
+using System.IO;
 
 #if USE_CSHARP_SQLITE
 using Sqlite3 = Community.CsharpSqlite.Sqlite3;
@@ -2656,6 +2659,9 @@ namespace SQLite
 			else if (clrType == typeof (Guid)) {
 				return "varchar(36)";
 			}
+			else if (clrType.GetTypeInfo ().IsDefined (typeof (DataContractAttribute))) {
+				return SQLite3.LibVersionNumber() >= 3009000 ? "json" : "text";
+			}
 			else {
 				throw new NotSupportedException ("Don't know about " + clrType);
 			}
@@ -3014,6 +3020,15 @@ namespace SQLite
 				else if (value is UriBuilder) {
 					SQLite3.BindText (stmt, index, ((UriBuilder)value).ToString (), -1, NegativePointer);
 				}
+				else if (value.GetType ().GetTypeInfo ().IsDefined (typeof (DataContractAttribute))) {
+					using (var stream = new MemoryStream ())
+					{
+						new DataContractJsonSerializer (value.GetType()).WriteObject(stream, value);
+						var bytes = stream.ToArray ();
+						var json = Encoding.UTF8.GetString (bytes, 0, bytes.Length);
+						SQLite3.BindText (stmt, index, json, -1, NegativePointer);
+					}
+				}
 				else {
 					// Now we could possibly get an enum, retrieve cached info
 					var valueType = value.GetType ();
@@ -3135,6 +3150,13 @@ namespace SQLite
                     var text = SQLite3.ColumnString(stmt, index);
                     return new UriBuilder(text);
                 }
+				else if (clrType.GetTypeInfo ().IsDefined (typeof (DataContractAttribute))) {
+					var json = SQLite3.ColumnString (stmt, index);
+					using (var stream = new MemoryStream(Encoding.UTF8.GetBytes (json)))
+					{
+						return new DataContractJsonSerializer (clrType).ReadObject (stream);
+					}
+				}
 				else {
 					throw new NotSupportedException ("Don't know how to read " + clrType);
 				}
